@@ -1,0 +1,147 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "claim-upload",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        112,
+        304
+      ],
+      "webhookId": "2b48fd13-a3e2-4a15-b790-a8fae8ba78c3"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst body = item.json.body || item.json;\n\nconst patientId = body.patient_id || 'PAT-UNKNOWN';\nconst patientName = body.patient_name || 'Patient';\nconst diagnosisNarrative = body.diagnosis_narrative || 'N/A';\nconst icd10Code = body.icd10_code || '';\nconst cptCode = body.cpt_code || '';\nconst roomRentBilled = Number(body.room_rent_billed || 0);\nconst surgeryFeeBilled = Number(body.surgery_fee_billed || 0);\nconst medicineFeeBilled = Number(body.medicine_fee_billed || 0);\nconst sumInsured = Number(body.sum_insured || 0);\n\nlet confidenceScore = 1.0;\nconst discrepancyFlags = [];\nconst itemizedDeductions = [];\n\n// 1. Code Consistency Check: K35.80 (Appendicitis) vs 44970 (Laparoscopic Appendectomy)\nif (icd10Code === 'K35.80' && cptCode !== '44970') {\n  confidenceScore -= 0.30;\n  discrepancyFlags.push('CODING_MISMATCH: ICD-10 K35.80 (Appendicitis) requires CPT 44970 (Laparoscopic Appendectomy). Received CPT: ' + cptCode);\n}\n\n// 2. Room Rent Sub-Limit Check: Room rent billed exceeds 1% of sum_insured\nconst maxAllowedRoomRent = sumInsured * 0.01;\nlet roomRentDeduction = 0;\nif (roomRentBilled > maxAllowedRoomRent) {\n  roomRentDeduction = roomRentBilled - maxAllowedRoomRent;\n  confidenceScore -= 0.15;\n  discrepancyFlags.push('SUB_LIMIT_EXCEEDED: Room rent billed (₹' + roomRentBilled.toLocaleString() + ') exceeds 1% sum insured cap (₹' + maxAllowedRoomRent.toLocaleString() + ')');\n  itemizedDeductions.push({\n    category: 'Room Rent Sub-limit',\n    claimed: roomRentBilled,\n    allowed: maxAllowedRoomRent,\n    deducted: roomRentDeduction,\n    reason: 'Breaches 1% sum insured sub-limit'\n  });\n}\n\n// Financial Totals Calculation\nconst totalBilled = roomRentBilled + surgeryFeeBilled + medicineFeeBilled;\nconst totalDeducted = roomRentDeduction;\nconst totalApproved = Math.max(0, totalBilled - totalDeducted);\nconst finalConfidence = Math.max(0, Number(confidenceScore.toFixed(2)));\n\n// Status Determination\nconst status = (finalConfidence >= 0.85 && discrepancyFlags.length === 0) ? 'APPROVED' : 'PENDING_REVIEW';\n\nreturn [{\n  json: {\n    status,\n    patient_id: patientId,\n    patient_name: patientName,\n    diagnosis_narrative: diagnosisNarrative,\n    icd10_code: icd10Code,\n    cpt_code: cptCode,\n    confidence_score: finalConfidence,\n    discrepancy_flags: discrepancyFlags,\n    financial_breakdown: {\n      room_rent_billed: roomRentBilled,\n      surgery_fee_billed: surgeryFeeBilled,\n      medicine_fee_billed: medicineFeeBilled,\n      sum_insured: sumInsured,\n      max_allowed_room_rent: maxAllowedRoomRent,\n      total_billed: totalBilled,\n      total_deducted: totalDeducted,\n      total_approved: totalApproved,\n      deductions: itemizedDeductions\n    },\n    adjudication_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "code-node",
+      "name": "Clinical Extraction & Code Mapping",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "status-check",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "APPROVED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-node",
+      "name": "Check Approval Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        544,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-approved",
+      "name": "Respond Approved",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        768,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-pending",
+      "name": "Respond Pending Review",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        768,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Clinical Extraction & Code Mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clinical Extraction & Code Mapping": {
+      "main": [
+        [
+          {
+            "node": "Check Approval Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Approval Status": {
+      "main": [
+        [
+          {
+            "node": "Respond Approved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Pending Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "ce633715522fed7c810c382a8416068af510eb5efa2a068770ce7966e289da03"
+  }
+}
